@@ -4,6 +4,7 @@ import openpyxl
 from openpyxl.styles import PatternFill
 from openpyxl.comments import Comment
 from io import BytesIO
+import re
 
 st.set_page_config(page_title="Casting Error Detector", page_icon="🧮", layout="wide")
 st.title("🧮 Casting Error Detector")
@@ -60,45 +61,51 @@ if uploaded_file:
                             st.warning(f"⚠️ Error parsing SUM at {cell.coordinate}: {e}")
 
                     # --- + / - formulas ---
-                    elif "+" in formula or "-" in formula:
-                        try:
-                            expr = formula[1:].replace(" ", "")
-                            refs = [part for part in expr.replace("+", "|").replace("-", "|").split("|") if part]
+                    elif any(op in formula for op in ["+", "-", "*", "/"]):
+                      try:
+                          expr = formula[1:].replace(" ", "")
+                          refs = [part for part in expr.replace("+", "|").replace("-", "|").replace("*", "|").replace("/", "|").split("|") if part]
 
-                            ref_values = {}
-                            for ref in refs:
-                                if "!" in ref:
-                                    ref = ref.split("!")[-1]
-                                try:
-                                    v = sheet_v[ref].value
-                                    ref_values[ref] = v
-                                except Exception:
-                                    ref_values[ref] = 0
+                          ref_values = {}
+                          for ref in refs:
+                              clean_ref = ref.split("!")[-1] if "!" in ref else ref
+                              try:
+                                  v = sheet_v[clean_ref].value
+                                  ref_values[clean_ref] = v if isinstance(v, (int, float)) else 0
+                              except Exception:
+                                  ref_values[clean_ref] = 0
 
-                            numeric_values = [v for v in ref_values.values() if isinstance(v, (int, float))]
+                          # --- Safely replace cell refs in expression (exact match only) ---
+                          eval_expr = expr
+                          for ref, val in ref_values.items():
+                              eval_expr = re.sub(rf"\b{ref}\b", str(val), eval_expr)
 
-                            if numeric_values:
-                                eval_expr = expr
-                                for k, v in ref_values.items():
-                                    eval_expr = eval_expr.replace(k, str(v if v is not None else 0))
+                          # --- Evaluate expression correctly respecting + - * / ---
+                          actual_sum = round(eval(eval_expr), 2)
 
-                                actual_sum = round(eval(eval_expr), 2)
-                                rounded_sum = round(sum(round(v, 2) for v in numeric_values), 2)
-                                match = round(actual_sum, 2) == round(rounded_sum, 2)
+                          # --- Rounded sum (only round each number before combining) ---
+                          rounded_expr = expr
+                          for ref, val in ref_values.items():
+                              rounded_val = round(val, 2)
+                              rounded_expr = re.sub(rf"\b{ref}\b", str(rounded_val), rounded_expr)
+                          rounded_sum = round(eval(rounded_expr), 2)
 
-                                if not match:
-                                    error_cells.setdefault(sheet_name, []).append((cell.coordinate, rounded_sum))
+                          match = actual_sum == rounded_sum
 
-                                results.append({
-                                    "Sheet": sheet_name,
-                                    "Cell": cell.coordinate,
-                                    "Formula": formula,
-                                    "Actual Sum": actual_sum,
-                                    "Rounded Sum": rounded_sum,
-                                    "Status": "✅ OK" if match else "❌ Casting error detected"
-                                })
-                        except Exception as e:
-                            st.warning(f"⚠️ Error evaluating + / - formula at {cell.coordinate}: {e}")
+                          if not match:
+                              error_cells.setdefault(sheet_name, []).append((cell.coordinate, rounded_sum))
+
+                          results.append({
+                              "Sheet": sheet_name,
+                              "Cell": cell.coordinate,
+                              "Formula": formula,
+                              "Actual Sum": actual_sum,
+                              "Rounded Sum": rounded_sum,
+                              "Status": "✅ OK" if match else "❌ Casting error detected"
+                          })
+                      except Exception as e:
+                          st.warning(f"⚠️ Error evaluating arithmetic formula at {cell.coordinate}: {e}")
+
 
     # ---- Display results ----
     if results:
