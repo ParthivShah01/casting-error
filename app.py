@@ -5,10 +5,24 @@ from openpyxl.styles import PatternFill
 from openpyxl.comments import Comment
 from io import BytesIO
 import re
+from decimal import Decimal, ROUND_HALF_UP
+
+# --- Excel-style rounding ---
+def excel_round(x):
+    try:
+        return float(Decimal(str(x)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP))
+    except:
+        return 0
 
 st.set_page_config(page_title="Casting Error Detector", page_icon="🧮", layout="wide")
 st.title("🧮 Casting Error Detector")
-st.caption("Detects rounding/casting mismatches in Excel formulas (SUM, +, -), highlights errors, and adds comments with rounded sums.")
+
+# --- Checkboxes ---
+col1, col2 = st.columns(2)
+with col1:
+    check_add = st.checkbox("Check Add / Sum / Sub formulas", value=True)
+with col2:
+    check_mul = st.checkbox("Check Mul / Div formulas", value=False)
 
 uploaded_file = st.file_uploader("📂 Upload your Excel file (.xlsx)", type=["xlsx"])
 
@@ -21,7 +35,7 @@ if uploaded_file:
         st.stop()
 
     results = []
-    error_cells = {}  # {sheet_name: [(cell_coord, rounded_sum)]}
+    error_cells = {}
 
     for sheet_name in wb_formula.sheetnames:
         sheet_f = wb_formula[sheet_name]
@@ -32,85 +46,104 @@ if uploaded_file:
                 if cell.data_type == "f" and isinstance(cell.value, str):
                     formula = cell.value.strip()
 
-                    # --- SUM() formulas ---
-                    if formula.upper().startswith("=SUM("):
-                        try:
+                    is_mul_div = ("*" in formula or "/" in formula)
+
+                    # --- Decide category ---
+                    if is_mul_div:
+                        process = check_mul
+                        category = "MUL/DIV"
+                    else:
+                        process = check_add
+                        category = "ADD/SUB"
+
+                    if not process:
+                        continue
+
+                    try:
+                        # --- SUM handling ---
+                        if formula.upper().startswith("=SUM("):
                             range_part = formula.upper().replace("=SUM(", "").replace(")", "")
                             cell_range = sheet_v[range_part]
-                            all_cells = [
-                                c.value for row_cells in cell_range for c in row_cells
+
+                            values = [
+                                c.value for r in cell_range for c in r
                                 if isinstance(c.value, (int, float))
                             ]
-                            if all_cells:
-                                actual_sum = round(sum(all_cells), 2)
-                                rounded_sum = round(sum(round(x, 2) for x in all_cells), 2)
-                                match = round(actual_sum, 2) == round(rounded_sum, 2)
 
-                                if not match:
-                                    error_cells.setdefault(sheet_name, []).append((cell.coordinate, rounded_sum))
+                            if not values:
+                                continue
 
-                                results.append({
-                                    "Sheet": sheet_name,
-                                    "Cell": cell.coordinate,
-                                    "Formula": formula,
-                                    "Actual Sum": actual_sum,
-                                    "Rounded Sum": rounded_sum,
-                                    "Status": "✅ OK" if match else "❌ Casting error detected"
-                                })
-                        except Exception as e:
-                            st.warning(f"⚠️ Error parsing SUM at {cell.coordinate}: {e}")
+                            rounded_inputs = [excel_round(x) for x in values]
+                            rounded_calc = excel_round(sum(rounded_inputs))
 
-                    # --- + / - formulas ---
-                    elif any(op in formula for op in ["+", "-", "*", "/"]):
-                      try:
-                          expr = formula[1:].replace(" ", "")
-                          refs = [part for part in expr.replace("+", "|").replace("-", "|").replace("*", "|").replace("/", "|").split("|") if part]
+                        else:
+                            # --- Arithmetic handling ---
+                            expr = formula[1:].replace(" ", "")
 
-                          ref_values = {}
-                          for ref in refs:
-                              clean_ref = ref.split("!")[-1] if "!" in ref else ref
-                              try:
-                                  v = sheet_v[clean_ref].value
-                                  ref_values[clean_ref] = v if isinstance(v, (int, float)) else 0
-                              except Exception:
-                                  ref_values[clean_ref] = 0
+                            refs = re.findall(r"[A-Z]+[0-9]+", expr)
 
-                          # --- Safely replace cell refs in expression (exact match only) ---
-                          eval_expr = expr
-                          for ref, val in ref_values.items():
-                              eval_expr = re.sub(rf"\b{ref}\b", str(val), eval_expr)
+                            ref_values = {}
+                            for ref in refs:
+                                try:
+                                    v = sheet_v[ref].value
+                                    ref_values[ref] = v if isinstance(v, (int, float)) else 0
+                                except:
+                                    ref_values[ref] = 0
 
-                          # --- Evaluate expression correctly respecting + - * / ---
-                          actual_sum = round(eval(eval_expr), 2)
+                            # actual values replaced
+                            eval_expr = expr
+                            for ref, val in ref_values.items():
+                                eval_expr = re.sub(rf"\b{ref}\b", str(val), eval_expr)
 
-                          # --- Rounded sum (only round each number before combining) ---
-                          rounded_expr = expr
-                          for ref, val in ref_values.items():
-                              rounded_val = round(val, 2)
-                              rounded_expr = re.sub(rf"\b{ref}\b", str(rounded_val), rounded_expr)
-                          rounded_sum = round(eval(rounded_expr), 2)
+                            # rounded inputs replaced
+                            rounded_expr = expr
+                            for ref, val in ref_values.items():
+                                rounded_expr = re.sub(rf"\b{ref}\b", str(excel_round(val)), rounded_expr)
 
-                          match = actual_sum == rounded_sum
+                            rounded_calc = excel_round(eval(rounded_expr))
 
-                          if not match:
-                              error_cells.setdefault(sheet_name, []).append((cell.coordinate, rounded_sum))
+                        # --- Excel cell value ---
+                        actual_cell_val = sheet_v[cell.coordinate].value
+                        actual_cell_val = excel_round(actual_cell_val)
 
-                          results.append({
-                              "Sheet": sheet_name,
-                              "Cell": cell.coordinate,
-                              "Formula": formula,
-                              "Actual Sum": actual_sum,
-                              "Rounded Sum": rounded_sum,
-                              "Status": "✅ OK" if match else "❌ Casting error detected"
-                          })
-                      except Exception as e:
-                          st.warning(f"⚠️ Error evaluating arithmetic formula at {cell.coordinate}: {e}")
+                        match = (rounded_calc == actual_cell_val)
 
+                        # --- Logic based on checkbox state ---
+                        if is_mul_div and not check_mul:
+                            # Only comment, no checking
+                            error_cells.setdefault(sheet_name, []).append(
+                                (cell.coordinate, f"Rounded Value = {rounded_calc}", False)
+                            )
 
-    # ---- Display results ----
+                        elif not is_mul_div and not check_add:
+                            # Only comment, no checking
+                            error_cells.setdefault(sheet_name, []).append(
+                                (cell.coordinate, f"Rounded Value = {rounded_calc}", False)
+                            )
+
+                        else:
+                            # Perform casting check
+                            if not match:
+                                error_cells.setdefault(sheet_name, []).append(
+                                    (cell.coordinate, f"Rounded Calculation = {rounded_calc}", True)
+                                )
+
+                        results.append({
+                            "Sheet": sheet_name,
+                            "Cell": cell.coordinate,
+                            "Formula": formula,
+                            "Rounded Calc": rounded_calc,
+                            "Excel Value": actual_cell_val,
+                            "Status": "✅ OK" if match else "❌ Casting Error"
+                        })
+
+                    except Exception as e:
+                        st.warning(f"⚠️ Error at {cell.coordinate}: {e}")
+
+    # ---- Display ----
     if results:
         df = pd.DataFrame(results)
-        st.subheader("📊 Detected Formulas Summary")
+        st.subheader("📊 Summary")
 
         def highlight_status(val):
             if "❌" in val:
@@ -121,30 +154,32 @@ if uploaded_file:
 
         st.dataframe(df.style.map(highlight_status, subset=["Status"]))
 
-        # ---- Highlight & Comment in Excel ----
+        # --- Excel Highlight & Comments ---
         yellow_fill = PatternFill(start_color="FFFACD", end_color="FFFACD", fill_type="solid")
 
         for sheet_name, cells in error_cells.items():
             sheet = wb_formula[sheet_name]
-            for cell_ref, rounded_sum in cells:
+            for cell_ref, comment_text, highlight in cells:
                 cell = sheet[cell_ref]
-                cell.fill = yellow_fill
-                comment_text = f"Rounded Sum = {rounded_sum}"
+
+                if highlight:
+                    cell.fill = yellow_fill
+
                 cell.comment = Comment(comment_text, "Casting Error Detector")
 
-        # ---- Save to BytesIO for download ----
+        # --- Download ---
         output = BytesIO()
         wb_formula.save(output)
         output.seek(0)
 
         st.download_button(
-            label="📥 Download Highlighted Excel with Comments",
+            label="📥 Download Excel",
             data=output,
             file_name="CastingErrorHighlighted.xlsx",
             mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
 
     else:
-        st.warning("No formulas found in the entire workbook.")
+        st.warning("No formulas processed.")
 else:
-    st.info("⬆️ Please upload an Excel file to begin.")
+    st.info("⬆️ Upload Excel file")
