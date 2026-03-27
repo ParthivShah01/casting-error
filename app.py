@@ -138,7 +138,8 @@ if uploaded_file:
                         })
 
                     except Exception as e:
-                        st.warning(f"⚠️ Error at {cell.coordinate}: {e}")
+                        # st.warning(f"⚠️ Error at {cell.coordinate}: {e}")
+                        pass
 
     # ---- Display ----
     if results:
